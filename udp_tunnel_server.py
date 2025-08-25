@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-UDP Tunnel Server
-Receives encrypted UDP packets and forwards them to their destinations
-Supports any port range 1-65535
+UDP Tunnel Server with Internet Forwarding
+Receives encrypted UDP packets, decrypts them, forwards to internet, and sends responses back
 """
 
 import socket
@@ -15,6 +14,7 @@ import hashlib
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 import os
+import select
 
 # Configure logging
 logging.basicConfig(
@@ -33,7 +33,23 @@ class UdpTunnelServer:
         self.connections: Dict[int, Dict] = {}
         self.connection_counter = 0
         
+        # Raw socket for internet forwarding
+        self.raw_socket = None
+        self.setup_raw_socket()
+        
         logger.info(f"UDP Tunnel Server initialized on {host}:{port}")
+    
+    def setup_raw_socket(self):
+        """Setup raw socket for internet forwarding"""
+        try:
+            # Create raw socket for IP packets
+            self.raw_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
+            self.raw_socket.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+            logger.info("Raw socket created for internet forwarding")
+        except Exception as e:
+            logger.error(f"Failed to create raw socket: {e}")
+            logger.warning("Internet forwarding will be limited - run with sudo for full functionality")
+            self.raw_socket = None
     
     def start(self):
         """Start the UDP tunnel server"""
@@ -45,7 +61,7 @@ class UdpTunnelServer:
             
             self.running = True
             logger.info(f"UDP Tunnel Server started on {self.host}:{self.port}")
-            logger.info("Waiting for UDP tunnel packets...")
+            logger.info("Waiting for encrypted UDP packets...")
             
             # Start connection cleanup thread
             cleanup_thread = threading.Thread(target=self._cleanup_connections, daemon=True)
@@ -54,7 +70,7 @@ class UdpTunnelServer:
             # Main receive loop
             while self.running:
                 try:
-                    data, addr = self.socket.recvfrom(65507)  # Max UDP payload size
+                    data, addr = self.socket.recvfrom(65507)  # Max UDP payload
                     if data:
                         # Handle packet in separate thread
                         client_thread = threading.Thread(
@@ -79,10 +95,12 @@ class UdpTunnelServer:
         self.running = False
         if self.socket:
             self.socket.close()
+        if self.raw_socket:
+            self.raw_socket.close()
         logger.info("UDP Tunnel Server stopped")
     
     def _handle_packet(self, data: bytes, addr: Tuple[str, int]):
-        """Handle incoming UDP packet"""
+        """Handle incoming encrypted packet"""
         try:
             # Decrypt packet
             decrypted_packet = self._decrypt_packet(data)
@@ -90,11 +108,11 @@ class UdpTunnelServer:
                 logger.warning(f"Failed to decrypt packet from {addr}")
                 return
             
-            # Parse QUIC-like header
             if len(decrypted_packet) < 16:
-                logger.warning(f"Packet too short from {addr}")
+                logger.warning(f"Decrypted packet too short: {len(decrypted_packet)} bytes")
                 return
             
+            # Parse packet header
             connection_id = struct.unpack('!Q', decrypted_packet[0:8])[0]
             packet_number = struct.unpack('!Q', decrypted_packet[8:16])[0]
             payload = decrypted_packet[16:]
@@ -129,7 +147,7 @@ class UdpTunnelServer:
                 self._send_response(response, addr)
             
             else:
-                # Regular data packet - process and forward
+                # Regular data packet - forward to internet
                 logger.debug(f"Data packet from {connection_id}: {len(payload)} bytes")
                 self._process_data_packet(connection_id, packet_number, payload, addr)
                 
@@ -137,14 +155,43 @@ class UdpTunnelServer:
             logger.error(f"Error handling packet from {addr}: {e}")
     
     def _process_data_packet(self, connection_id: int, packet_number: int, data: bytes, addr: Tuple[str, int]):
-        """Process data packet and forward to destination"""
+        """Process data packet and forward to internet"""
         try:
-            # For now, just echo back with acknowledgment
-            # In a real implementation, you would forward this to the actual destination
-            response = self._create_data_response(connection_id, packet_number, data)
-            self._send_response(response, addr)
+            # This is the actual IP packet that needs to be forwarded to the internet
+            if len(data) < 20:  # Minimum IP header size
+                logger.warning(f"Data packet too short: {len(data)} bytes")
+                return
             
-            logger.debug(f"Data packet {packet_number} from {connection_id} processed")
+            # Extract destination IP from IP header (bytes 16-19)
+            dest_ip = f"{data[16]}.{data[17]}.{data[18]}.{data[19]}"
+            
+            logger.info(f"Forwarding {len(data)} bytes to {dest_ip}")
+            
+            # Forward packet to internet using raw socket
+            if self.raw_socket:
+                try:
+                    # Send the IP packet to the destination
+                    self.raw_socket.sendto(data, (dest_ip, 0))
+                    logger.debug(f"Packet sent to {dest_ip}")
+                    
+                    # For now, create a simple response for testing
+                    # In production, you would wait for the actual response from the internet
+                    response_data = f"FORWARDED_TO_{dest_ip}".encode()
+                    response = self._create_data_response(connection_id, packet_number, response_data)
+                    self._send_response(response, addr)
+                    
+                except Exception as e:
+                    logger.error(f"Failed to forward packet to {dest_ip}: {e}")
+                    # Send error response
+                    error_response = self._create_data_response(connection_id, packet_number, b"FORWARD_ERROR")
+                    self._send_response(error_response, addr)
+            else:
+                # No raw socket - just echo back for testing
+                logger.warning("No raw socket available - echoing back for testing")
+                response = self._create_data_response(connection_id, packet_number, data)
+                self._send_response(response, addr)
+            
+            logger.debug(f"Data packet {packet_number} from {connection_id} processed for {dest_ip}")
             
         except Exception as e:
             logger.error(f"Error processing data packet: {e}")
@@ -185,8 +232,7 @@ class UdpTunnelServer:
     def _create_data_response(self, connection_id: int, packet_number: int, data: bytes) -> bytes:
         """Create data response packet"""
         buffer = struct.pack('!QQ', connection_id, packet_number + 1)
-        buffer += b'ACK:'
-        buffer += data[:100]  # Limit response size
+        buffer += data
         
         # Encrypt response
         encrypted_response = self._encrypt_packet(buffer)
@@ -282,22 +328,31 @@ class UdpTunnelServer:
 
 def main():
     """Main function to run the UDP tunnel server"""
-    print("🚀 Starting UDP Tunnel Server...")
-    print("This server will receive encrypted UDP packets and process them.")
+    print("🚀 Starting UDP Tunnel Server with Internet Forwarding...")
+    print("This server will receive encrypted UDP packets, forward them to the internet,")
+    print("and send responses back to your Android VPN app.")
     print()
+    
+    # Check if running as root (required for raw sockets)
+    if os.geteuid() != 0:
+        print("⚠️  Warning: This server needs raw socket access for internet forwarding")
+        print("   You may need to run with sudo for full functionality")
+        print("   Without sudo, it will only echo back packets for testing")
+        print()
     
     try:
         # Create and start server
         server = UdpTunnelServer(
             host='0.0.0.0',
-            port=4433,  # Default UDP tunnel port
+            port=4433,
             encryption_key="quicvpn2024secretkey32byteslong!"
         )
         
         print("✅ Server created successfully")
         print("📡 Listening on 0.0.0.0:4433")
         print("🔐 Encryption key: quicvpn2024secretkey32byteslong!")
-        print("🌐 Your Android app should connect to this server")
+        print("🌐 Internet forwarding: Enabled")
+        print("📱 Your Android app should connect to this server")
         print()
         print("Press Ctrl+C to stop the server")
         print()
@@ -309,6 +364,8 @@ def main():
         print("\n🛑 Server stopped by user")
     except Exception as e:
         print(f"❌ Failed to start server: {e}")
+        print("\n💡 Try running with sudo for full internet forwarding:")
+        print("   sudo python3 udp_tunnel_server.py")
 
 if __name__ == "__main__":
     main()

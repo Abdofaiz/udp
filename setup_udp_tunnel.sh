@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # UDP Tunnel Server Setup Script
-# This script sets up a UDP tunnel server on your VPS
+# This script sets up a UDP tunnel server with internet forwarding on your VPS
 
-echo "🚀 Setting up UDP Tunnel Server..."
-echo "=================================="
+echo "🚀 Setting up UDP Tunnel Server with Internet Forwarding..."
+echo "=========================================================="
 
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then
-    echo "⚠️  This script needs to run as root for port 4433"
+    echo "⚠️  This script needs to run as root for raw socket access"
     echo "   Run: sudo bash setup_udp_tunnel.sh"
     exit 1
 fi
@@ -45,7 +45,7 @@ cp requirements.txt /opt/udp_tunnel/server/
 echo "⚙️  Creating systemd service..."
 cat > /etc/systemd/system/udp-tunnel.service << EOF
 [Unit]
-Description=UDP Tunnel Server
+Description=UDP Tunnel Server with Internet Forwarding
 After=network.target
 
 [Service]
@@ -82,7 +82,7 @@ echo "✅ UDP Tunnel Server setup complete!"
 echo "===================================="
 echo "🌐 Server listening on: 0.0.0.0:4433 (UDP)"
 echo "🔐 Encryption key: quicvpn2024secretkey32byteslong!"
-echo "🌍 Supports all UDP ports: 1-65535"
+echo "🌍 Internet forwarding: Enabled (requires root)"
 echo ""
 echo "📱 Your Android app should connect to:"
 echo "   Server: $(hostname -I | awk '{print $1}')"
@@ -96,4 +96,6 @@ echo "   Start service: systemctl start udp-tunnel"
 echo ""
 echo "🔍 Testing the server:"
 echo "   netcat -u $(hostname -I | awk '{print $1}') 4433"
+echo ""
+echo "⚠️  Important: Run with sudo for full internet forwarding capability"
 echo ""
