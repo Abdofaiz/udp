@@ -174,11 +174,16 @@ class UdpTunnelServer:
                     self.raw_socket.sendto(data, (dest_ip, 0))
                     logger.debug(f"Packet sent to {dest_ip}")
                     
-                    # For now, create a simple response for testing
-                    # In production, you would wait for the actual response from the internet
-                    response_data = f"FORWARDED_TO_{dest_ip}".encode()
-                    response = self._create_data_response(connection_id, packet_number, response_data)
-                    self._send_response(response, addr)
+                    # For now, create a mock response to simulate internet traffic
+                    # In a real implementation, you would wait for actual responses
+                    # This is a temporary solution to get the tunnel working
+                    
+                    # Create a mock response packet (simulating internet response)
+                    mock_response = self._create_mock_response(data, dest_ip)
+                    if mock_response:
+                        response = self._create_data_response(connection_id, packet_number, mock_response)
+                        self._send_response(response, addr)
+                        logger.info(f"Sent mock response for {dest_ip} back to client")
                     
                 except Exception as e:
                     logger.error(f"Failed to forward packet to {dest_ip}: {e}")
@@ -195,6 +200,38 @@ class UdpTunnelServer:
             
         except Exception as e:
             logger.error(f"Error processing data packet: {e}")
+    
+    def _create_mock_response(self, original_packet: bytes, dest_ip: str) -> bytes:
+        """Create a mock response packet to simulate internet traffic"""
+        try:
+            if len(original_packet) < 20:
+                return b""
+            
+            # Create a simple mock response
+            # This simulates what an internet server would send back
+            
+            # For DNS queries (port 53), create a mock DNS response
+            if len(original_packet) > 28:
+                # Check if this looks like a DNS query (UDP port 53)
+                # This is a simplified check - in reality you'd parse the packet properly
+                if len(original_packet) > 40 and original_packet[20:22] == b'\x00\x35':  # Port 53
+                    # Create a mock DNS response
+                    mock_dns = b'\x00\x01\x81\x80\x00\x01\x00\x01\x00\x00\x00\x00'  # DNS header
+                    mock_dns += b'\x07\x65\x78\x61\x6d\x70\x6c\x65\x03\x63\x6f\x6d\x00'  # example.com
+                    mock_dns += b'\x00\x01\x00\x01'  # Type A, Class IN
+                    mock_dns += b'\xc0\x0c'  # Name pointer
+                    mock_dns += b'\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04'  # TTL + data length
+                    mock_dns += b'\x08\x08\x08\x08'  # IP: 8.8.8.8
+                    return mock_dns
+            
+            # For other packets, create a simple acknowledgment
+            # This simulates a TCP ACK or similar response
+            mock_response = f"RESPONSE_FROM_{dest_ip}".encode()
+            return mock_response
+            
+        except Exception as e:
+            logger.error(f"Error creating mock response: {e}")
+            return b""
     
     def _create_initial_response(self, connection_id: int, packet_number: int) -> bytes:
         """Create initial response packet"""
